@@ -193,8 +193,8 @@ namespace FastWrapper
 		SqlString loadMode,             // "Append" or "Truncate"
 		SqlInt32 batchSize,             // e.g. 130000
 		SqlBoolean useWorkTables,       // use staging work tables before final insert
-		SqlString method,               // distribution method for parallelism :"None", "Random", "DataDriven", "RangeId", "Ntile", "Ctid", "Rowid", "Physloc", "NZDataSlice"
-		SqlString distributeKeyColumn,  // required if method in ["Random","DataDriven","RangeId","Ntile"]
+		SqlString method,               // distribution method for parallelism :"None", "Random", "DataDriven", "DBPartition", "RangeId", "Ntile", "Timepartition", "Ctid", "Rowid", "Physloc", "NZDataSlice"
+		SqlString distributeKeyColumn,  // required if method in ["Random","DataDriven","RangeId","Ntile","Timepartition"]. For Timepartition : (datecolumn,year) | (datecolumn,year,month) | (datecolumn,year,month,day) | (datecolumn,year,week)
 		SqlString dataDrivenQuery,      // custom query for DataDriven method returning distinct values for distribution
 		SqlInt32 degree,                // concurrency degree if method != "None" useless if method = "None" should be != 1, can be less than 0 for dynamic degree (based on cpucount on the platform where FastTransfer is running. -2 = CpuCount/2)
 		SqlString mapMethod,            // "Position"(default) or "Name" (Automatic mapping of columns based on names (case insensitive) with tolerance on the order of columns. Non present columns in source or target are ignored. Name may mot be available for all target types (see doc))
@@ -345,8 +345,8 @@ namespace FastWrapper
 			{
 				// SourceInfos: exactly one of fileInput or query (if provided) (table +schema is optional)
 				int sourceChoiceCountfileandquery = 0;
-				if (!string.IsNullOrEmpty(fileInputVal)) sourceChoiceCount++;
-				if (!string.IsNullOrEmpty(queryVal)) sourceChoiceCount++;
+				if (!string.IsNullOrEmpty(fileInputVal)) sourceChoiceCountfileandquery++;
+				if (!string.IsNullOrEmpty(queryVal)) sourceChoiceCountfileandquery++;
 				if (sourceChoiceCountfileandquery > 1)
 				{
 					throw new ArgumentException("You must supply only one of fileInput or query");
@@ -394,19 +394,20 @@ namespace FastWrapper
 			bool hasMethod = !string.IsNullOrEmpty(methodVal);
 			if (hasMethod)
 			{
-				string[] validMethods = { "None", "Random", "DataDriven", "RangeId", "Ntile", "Ctid", "Rowid", "Physloc", "NZDataSlice" };
+				string[] validMethods = { "None", "Random", "DataDriven", "DBPartition", "RangeId", "Ntile", "Timepartition", "Ctid", "Rowid", "Physloc", "NZDataSlice" };
 				if (Array.IndexOf(validMethods, methodVal) < 0)
 				{
-					throw new ArgumentException($"Invalid method: '{methodVal}'. use 'None', 'Random', 'DataDriven', 'RangeId', 'Ntile', 'Ctid', 'Rowid', 'Physloc' or 'NZDataSlice'. WARNING the parameter is Case Sensitive");
+					throw new ArgumentException($"Invalid method: '{methodVal}'. use 'None', 'Random', 'DataDriven', 'DBPartition', 'RangeId', 'Ntile', 'Timepartition', 'Ctid', 'Rowid', 'Physloc' or 'NZDataSlice'. WARNING the parameter is Case Sensitive");
 				}
 
 				if (!methodVal.Equals("None"))
 				{
-					// If method in [Random, DataDriven, RangeId, Ntile], must have distributeKeyColumn
+					// If method in [Random, DataDriven, RangeId, Ntile, Timepartition], must have distributeKeyColumn
 					if (methodVal.Equals("Random") ||
 						methodVal.Equals("DataDriven") ||
 						methodVal.Equals("RangeId") ||
-						methodVal.Equals("Ntile"))
+						methodVal.Equals("Ntile") ||
+						methodVal.Equals("Timepartition"))
 					{
 						if (string.IsNullOrEmpty(distKeyColVal))
 						{
@@ -448,8 +449,10 @@ namespace FastWrapper
 			string exePath = exeDir;
 			// If not specifically ending with "FastTransfer.exe" or "fasttransfer",
 			// try appending "FastTransfer.exe" automatically:
-			if (!exePath.EndsWith("FastTransfer.exe", StringComparison.OrdinalIgnoreCase) &&
-				!exePath.EndsWith("fasttransfer", StringComparison.OrdinalIgnoreCase))
+			// (an existing directory such as "D:\FastTransfer" is always a directory, even if it ends with "fasttransfer")
+			if (Directory.Exists(exePath) ||
+				(!exePath.EndsWith("FastTransfer.exe", StringComparison.OrdinalIgnoreCase) &&
+				!exePath.EndsWith("fasttransfer", StringComparison.OrdinalIgnoreCase)))
 			{
 				if (!exePath.EndsWith("\\") && !exePath.EndsWith("/"))
 				{
@@ -580,7 +583,8 @@ namespace FastWrapper
 					if (methodVal.Equals("random", StringComparison.OrdinalIgnoreCase) ||
 						methodVal.Equals("datadriven", StringComparison.OrdinalIgnoreCase) ||
 						methodVal.Equals("rangeid", StringComparison.OrdinalIgnoreCase) ||
-						methodVal.Equals("ntile", StringComparison.OrdinalIgnoreCase))
+						methodVal.Equals("ntile", StringComparison.OrdinalIgnoreCase) ||
+						methodVal.Equals("timepartition", StringComparison.OrdinalIgnoreCase))
 					{
 						args += $" --distributeKeyColumn {Q(distKeyColVal)}";
 					}
@@ -694,7 +698,8 @@ namespace FastWrapper
 					string totalRows = System.Text.RegularExpressions.Regex.Match(stdout, @"Total rows\s*:\s*(\d+)").Groups[1].Value;
 					string totalColumns = System.Text.RegularExpressions.Regex.Match(stdout, @"Total columns\s*:\s*(\d+)").Groups[1].Value;
 					string totalCells = System.Text.RegularExpressions.Regex.Match(stdout, @"Total cells\s*:\s*(\d+)").Groups[1].Value;
-					string totalTime = System.Text.RegularExpressions.Regex.Match(stdout, @"Elapsed\s*=\s*(\d+)\s*ms").Groups[1].Value;
+					// "Total time : Elapsed=xxx ms" (FastTransfer >= 0.18 also logs "Transfer time : Elapsed=xxx ms" before it)
+					string totalTime = System.Text.RegularExpressions.Regex.Match(stdout, @"Total time\s*:\s*Elapsed\s*=\s*(\d+)\s*ms").Groups[1].Value;
 
 					// Send metrics to the SQL client as a table output added to the parameters (exepted the passwords and connect strings)
 					SqlDataRecord record = new SqlDataRecord(

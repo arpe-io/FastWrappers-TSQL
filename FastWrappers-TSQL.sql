@@ -79,6 +79,19 @@ BEGIN
     IF EXISTS (SELECT * FROM sys.objects WHERE name = 'EncryptString' AND type IN ('FN', 'TF', 'IF', 'FS'))
         DROP FUNCTION [dbo].[EncryptString];
     
+    -- Remove the previous version's hash from the trusted list (avoid accumulating stale hashes)
+    DECLARE @oldHash VARBINARY(64);
+    SELECT @oldHash = HASHBYTES('SHA2_512', af.content)
+    FROM sys.assembly_files af
+    JOIN sys.assemblies a ON a.assembly_id = af.assembly_id
+    WHERE a.name = 'FastWrappers_TSQL' AND af.file_id = 1;
+
+    IF @oldHash IS NOT NULL AND EXISTS (SELECT * FROM sys.trusted_assemblies WHERE [hash] = @oldHash)
+    BEGIN
+        EXEC sys.sp_drop_trusted_assembly @hash = @oldHash;
+        PRINT 'Previous trusted assembly hash removed.';
+    END
+
     -- Now drop the assembly
     DROP ASSEMBLY [FastWrappers_TSQL];
     PRINT 'Existing assembly [FastWrappers_TSQL] dropped.';
@@ -145,24 +158,24 @@ GO
 CREATE PROCEDURE [dbo].[xp_RunFastTransfer_secure]
 	@fastTransferDir [nvarchar](max),
 	@sourceConnectionType [nvarchar](30),
-	@sourceConnectStringSecure [nvarchar](4000) = N'',
+	@sourceConnectStringSecure [nvarchar](4000) = NULL,
 	@sourceServer [nvarchar](255),
-	@sourceDSN [nvarchar](255) = N'',
-	@sourceProvider [nvarchar](1000) = N'',
+	@sourceDSN [nvarchar](255) = NULL,
+	@sourceProvider [nvarchar](1000) = NULL,
 	@isSourceTrusted [bit] = 0,
-	@sourceUser [nvarchar](1000) = N'',
-	@sourcePasswordSecure [nvarchar](255) = N'',
+	@sourceUser [nvarchar](1000) = NULL,
+	@sourcePasswordSecure [nvarchar](255) = NULL,
 	@sourceDatabase [nvarchar](1000),
-	@fileInput [nvarchar](4000) = N'',
-	@query [nvarchar](4000) = N'',
-	@sourceSchema [nvarchar](255) = N'',
-	@sourceTable [nvarchar](255) = N'',
+	@fileInput [nvarchar](4000) = NULL,
+	@query [nvarchar](4000) = NULL,
+	@sourceSchema [nvarchar](255) = NULL,
+	@sourceTable [nvarchar](255) = NULL,
 	@targetConnectionType [nvarchar](30),
-	@targetConnectStringSecure [nvarchar](4000) = N'',
+	@targetConnectStringSecure [nvarchar](4000) = NULL,
 	@targetServer [nvarchar](255),
 	@isTargetTrusted [bit] = 0,
-	@targetUser [nvarchar](1000) = N'',
-	@targetPasswordSecure [nvarchar](255) = N'',
+	@targetUser [nvarchar](1000) = NULL,
+	@targetPasswordSecure [nvarchar](255) = NULL,
 	@targetDatabase [nvarchar](255),
 	@targetSchema [nvarchar](255),
 	@targetTable [nvarchar](255),
@@ -170,15 +183,15 @@ CREATE PROCEDURE [dbo].[xp_RunFastTransfer_secure]
 	@batchSize [int] = 1048576,
 	@useWorkTables [bit] = 0,
 	@method [nvarchar](50) = N'None',
-	@distributeKeyColumn [nvarchar](255) = N'',
-	@dataDrivenQuery [nvarchar](4000) = N'',
+	@distributeKeyColumn [nvarchar](255) = NULL,
+	@dataDrivenQuery [nvarchar](4000) = NULL,
 	@degree [int] = 4,
 	@mapmethod [nvarchar](50) = N'Position',
-	@runId [nvarchar](255) = N'',
-	@settingsFile [nvarchar](4000) = N'',
+	@runId [nvarchar](255) = NULL,
+	@settingsFile [nvarchar](4000) = NULL,
 	@debug [bit] = 0,
 	@noBanner [bit] = 0,
-	@license [nvarchar](4000) = N'',
+	@license [nvarchar](4000) = NULL,
 	@loglevel [nvarchar](50) = N'information'
 WITH EXECUTE AS CALLER
 AS EXTERNAL NAME [FastWrappers_TSQL].[FastWrapper.FastTransferCLR].[RunFastTransfer_Secure];
@@ -198,43 +211,44 @@ END
 GO
 
 CREATE PROCEDURE [dbo].[xp_RunFastBCP_secure]
-	@fastBcpDir [nvarchar](max),
+	@fastBCPDir [nvarchar](1000),
 	@connectionType [nvarchar](30),
-	@sourceConnectStringEnc [nvarchar](4000) = N'',
-	@sourcedsn [nvarchar](255) = N'',
-	@sourceprovider [nvarchar](1000) = N'',
-	@sourceserver [nvarchar](255) = N'',
-	@sourceuser [nvarchar](1000) = N'',
-	@sourcepasswordEnc [nvarchar](4000) = N'',
-	@trusted [bit] = 0,
-	@sourcedatabase [nvarchar](1000),
+	@sourceconnectStringSecure [nvarchar](4000) = NULL,
+	@sourcedsn [nvarchar](255) = NULL,
+	@sourceprovider [nvarchar](1000) = NULL,
+	@sourceserver [nvarchar](255) = NULL,
+	@sourceuser [nvarchar](1000) = NULL,
+	@sourcepasswordSecure [nvarchar](255) = NULL,
+	@isTrusted [bit] = 0,
+	@sourcedatabase [nvarchar](1000) = NULL,
 	@applicationintent [nvarchar](20) = N'ReadOnly',
-	@inputFile [nvarchar](4000) = N'',
-	@query [nvarchar](4000) = N'',
-	@sourceschema [nvarchar](255) = N'',
-	@sourcetable [nvarchar](255) = N'',
-	@outputFile [nvarchar](4000) = N'',
-	@outputDirectory [nvarchar](4000) = N'',
-	@delimiter [nvarchar](10) = N'|',
+	@inputFile [nvarchar](1000) = NULL,
+	@query [nvarchar](4000) = NULL,
+	@sourceschema [nvarchar](255) = NULL,
+	@sourcetable [nvarchar](255) = NULL,
+	@outputFile [nvarchar](1000) = NULL,
+	@outputDirectory [nvarchar](2000) = NULL,
+	@delimiter [nvarchar](10) = NULL,
 	@usequotes [bit] = 0,
-	@dateformat [nvarchar](50) = N'yyyy-MM-dd',
-	@encoding [nvarchar](50) = N'UTF-8',
-	@decimalseparator [nvarchar](2) = N',',
+	@dateformat [nvarchar](25) = NULL,
+	@encoding [nvarchar](50) = NULL,
+	@decimalSeparator [nvarchar](1) = NULL,
 	@parquetcompression [nvarchar](20) = N'zstd',
 	@degree [int] = -2,
 	@method [nvarchar](50) = N'None',
-	@distributeKeyColumn [nvarchar](255) = N'',
-	@datadrivenquery [nvarchar](4000) = N'',
+	@distributeKeyColumn [nvarchar](1000) = NULL,
+	@datadrivenquery [nvarchar](4000) = NULL,
 	@mergeDistributedFile [bit] = 0,
 	@timestamped [bit] = 0,
 	@noheader [bit] = 0,
-	@boolformat [nvarchar](50) = N'automatic',
-	@runid [nvarchar](255) = N'',
-	@settingsfile [nvarchar](4000) = N'',
-	@config [nvarchar](4000) = N'',
-	@cloudprofile [nvarchar](255) = N'',
-	@license [nvarchar](4000) = N'',
-	@loglevel [nvarchar](50) = N'information',
+	@boolformat [nvarchar](10) = NULL,
+	@runid [nvarchar](255) = NULL,
+	@traceparent [nvarchar](55) = NULL,
+	@settingsfile [nvarchar](4000) = NULL,
+	@config [nvarchar](4000) = NULL,
+	@cloudprofile [nvarchar](2000) = NULL,
+	@license [nvarchar](4000) = NULL,
+	@loglevel [nvarchar](50) = N'Information',
 	@nobanner [bit] = 0,
 	@debug [bit] = 0
 WITH EXECUTE AS CALLER

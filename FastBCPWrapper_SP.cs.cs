@@ -17,7 +17,7 @@ namespace FastWrapper
 			SqlString fastBcpDir,
 
 			// Connection infosa
-			SqlString connectionType,          // clickhouse;hana;msoledbsql;mssql;mysql;nzcopy;nzoledb;nzsql;odbc;oledb;oraodp;pgcopy;pgsql;teradata
+			SqlString connectionType,          // clickhouse;hana;msoledbsql;mssql;mysql;nzcopy;nzoledb;nzsql;odbc;oledb;oraodp;pgcopy;pgsql;teradata;adbc_mssql;adbc_pgsql;adbc_oracle;adbc_netezza;adbc_teradata
 			SqlString sourceConnectStringEnc,  // chiffré (Base64) ; exclusif avec DSN/Provider/Server/User/Password/Trusted/Database
 			SqlString sourcedsn,                     // DSN (exclusif avec Provider/Server)
 			SqlString sourceprovider,                // OleDB sourceprovider (MSOLEDBSQL, NZOLEDB, …)
@@ -44,11 +44,11 @@ namespace FastWrapper
 			SqlString dateformat,              // -f (default "yyyy-MM-dd")
 			SqlString encoding,                // -e (default "UTF-8")
 			SqlString decimalseparator,        // -n (default ",")
-			SqlString parquetcompression,      // zstd;none;snappy;gzip;lzo;lz4 (default zstd)
+			SqlString parquetcompression,      // None;Snappy;Gzip;Lz4;Lz4Raw;Zstd (default Zstd)
 
 			// Parallel options
 			SqlInt32 degree,                   // -p (Default -2)
-			SqlString method,                  // -m (Random;DataDriven;Ctid;Physloc;Rowid;RangeId;Ntile;Timepartition;None) (Default None)
+			SqlString method,                  // -m (DataDriven;DBPartition;None;Ntile;Physical;Random;RangeId;Timepartition) (Default None). Ctid;NZDataSlice;Physloc;Rowid are deprecated (use Physical)
 			SqlString distributeKeyColumn,     // -c
 			SqlString datadrivenquery,         // -Q (optionnel)
 			SqlBoolean mergeDistributedFile,   // -M (bool) default True
@@ -58,6 +58,7 @@ namespace FastWrapper
 			SqlBoolean noheader,               // -h
 			SqlString boolformat,              // -b automatic;true/false;1/0;t/f;
 			SqlString runid,                   // -R
+			SqlString traceparent,             // --traceparent (W3C traceparent for OpenTelemetry : 00-<32 hex>-<16 hex>-<2 hex>)
 			SqlString settingsfile,            // -l (default FastBCP_Settings.json)
 			SqlString config,                  // --config (YAML config file)
 			SqlString cloudprofile,            // --cloudprofile
@@ -119,6 +120,7 @@ namespace FastWrapper
 			bool noheaderVal = !noheader.IsNull && noheader.Value;
 			string boolfmtVal = boolformat.IsNull ? null : boolformat.Value.Trim();
 			string runidVal = runid.IsNull ? null : runid.Value.Trim();
+			string traceparentVal = traceparent.IsNull ? null : traceparent.Value.Trim();
 			string settingsVal = settingsfile.IsNull ? null : settingsfile.Value.Trim();
 			string configVal = config.IsNull ? null : config.Value.Trim();
 			string cloudProfVal = cloudprofile.IsNull ? null : cloudprofile.Value.Trim();
@@ -138,10 +140,37 @@ namespace FastWrapper
 			// Connection type
 			string[] allowedConn = {
 				"clickhouse","hana","msoledbsql","mssql","mysql",
-				"nzcopy","nzoledb","nzsql","odbc","oledb","oraodp","pgcopy","pgsql","teradata"
+				"nzcopy","nzoledb","nzsql","odbc","oledb","oraodp","pgcopy","pgsql","teradata",
+				"adbc_mssql","adbc_pgsql","adbc_oracle","adbc_netezza","adbc_teradata"
 			};
 			if (Array.IndexOf(allowedConn, connType) < 0)
-				throw new ArgumentException($"Invalid connectiontype '{connType}'.");
+				throw new ArgumentException($"Invalid connectiontype '{connType}'. Possible values are {string.Join(", ", allowedConn)}.");
+
+			// Parallel method (case insensitive, normalized to FastBCP casing)
+			if (!string.IsNullOrEmpty(methodVal))
+			{
+				string[] allowedMethods = { "DataDriven", "DBPartition", "None", "Ntile", "Physical", "Random", "RangeId", "Timepartition" };
+				string[] deprecatedMethods = { "Ctid", "NZDataSlice", "Physloc", "Rowid" };
+				string canonical = Array.Find(allowedMethods, m => string.Equals(m, methodVal, StringComparison.OrdinalIgnoreCase));
+				if (canonical == null)
+				{
+					canonical = Array.Find(deprecatedMethods, m => string.Equals(m, methodVal, StringComparison.OrdinalIgnoreCase));
+					if (canonical == null)
+						throw new ArgumentException($"Invalid method '{methodVal}'. Possible values are {string.Join(", ", allowedMethods)}.");
+					SqlContext.Pipe.Send($"Warning: method '{canonical}' is deprecated in FastBCP, use 'Physical' instead.\r\n");
+				}
+				methodVal = canonical;
+			}
+
+			// Parquet compression
+			if (!string.IsNullOrEmpty(parquetcompressionVal))
+			{
+				string[] allowedCompressions = { "None", "Snappy", "Gzip", "Lz4", "Lz4Raw", "Zstd" };
+				string canonical = Array.Find(allowedCompressions, c => string.Equals(c, parquetcompressionVal, StringComparison.OrdinalIgnoreCase));
+				if (canonical == null)
+					throw new ArgumentException($"Invalid parquetcompression '{parquetcompressionVal}'. Possible values are {string.Join(", ", allowedCompressions)}.");
+				parquetcompressionVal = canonical;
+			}
 
 			// DistinctGroupsCertification("N","P,S") → DSN XOR (Provider or Server)
 			// => si DSN fourni, alors Provider & Server doivent être vides
@@ -188,8 +217,10 @@ namespace FastWrapper
 			// FastBCP path building
 			// -----------------------------
 			string exePath = binDir;
-			if (!exePath.EndsWith("FastBCP.exe", StringComparison.OrdinalIgnoreCase) &&
-				!exePath.EndsWith("fastbcp", StringComparison.OrdinalIgnoreCase))
+			// (an existing directory such as "D:\FastBCP" is always a directory, even if it ends with "fastbcp")
+			if (Directory.Exists(exePath) ||
+				(!exePath.EndsWith("FastBCP.exe", StringComparison.OrdinalIgnoreCase) &&
+				!exePath.EndsWith("fastbcp", StringComparison.OrdinalIgnoreCase)))
 			{
 				if (!exePath.EndsWith("\\") && !exePath.EndsWith("/"))
 					exePath += Path.DirectorySeparatorChar;
@@ -296,6 +327,8 @@ namespace FastWrapper
 				args.Append(" --boolformat ").Append(Q(boolfmtVal));
 			if (!string.IsNullOrEmpty(runidVal))
 				args.Append(" --runid ").Append(Q(runidVal));
+			if (!string.IsNullOrEmpty(traceparentVal))
+				args.Append(" --traceparent ").Append(Q(traceparentVal));
 			if (!string.IsNullOrEmpty(settingsVal))
 				args.Append(" --settingsfile ").Append(Q(settingsVal));
 			if (!string.IsNullOrEmpty(configVal))
@@ -312,8 +345,13 @@ namespace FastWrapper
 			string argLine = args.ToString().Trim();
 
 			// Debug Display
+			// (password and connect string are masked)
 			if (debugVal)
-				SqlContext.Pipe.Send("FastBCP Command:\r\n" + exePath + " " + argLine + "\r\n");
+			{
+				string argLine4Log = Regex.Replace(argLine, @"--sourcepassword\s+""[^""]*""", "--sourcepassword \"<hidden>\"");
+				argLine4Log = Regex.Replace(argLine4Log, @"--sourceconnectstring\s+""[^""]*""", "--sourceconnectstring \"<hidden>\"");
+				SqlContext.Pipe.Send("FastBCP Command:\r\n" + exePath + " " + argLine4Log + "\r\n");
+			}
 
 			// -----------------------------
 			// Execution
@@ -362,6 +400,8 @@ namespace FastWrapper
 					// Total time : Elapsed=xxxx ms to get the total time taken in milliseconds
 					// Target file(s) : need to get the list of target files created (if several files, comma separated)
 
+					// keep the full stdout to extract the list of files (may be long with a high degree)
+					string fullStdout = stdout;
 					if (stdout.Length > 3000)
 					{
 						stdout = stdout.Substring(stdout.Length - 3000);
@@ -393,7 +433,7 @@ namespace FastWrapper
 					var errorMsg = string.Empty;
 					if (exitCode != 0)
 					{
-						errorMsg = $"FastTransfer process failed with exit code {exitCode}. See stderr for details.";
+						errorMsg = $"FastBCP process failed with exit code {exitCode}. See stderr for details.";
 						errorMsg += Environment.NewLine + stdout;
 					}
 
@@ -412,10 +452,11 @@ namespace FastWrapper
 						source = $"{databaseVal}.{srcSchemaVal}.{srcTableVal}";
 					}
 
-					string extension = Regex.Escape(Path.GetExtension(outFileVal)); // e.g. ".csv" → "\.csv"
+					// e.g. ".csv" → "\.csv" ; no output file (directory only) → any extension
+					string extension = string.IsNullOrEmpty(outFileVal) ? @"\.\w+" : Regex.Escape(Path.GetExtension(outFileVal));
 					string pattern = $@"into\s+(.+?{extension})\s";
 
-					var matches = Regex.Matches(stdout, pattern, RegexOptions.IgnoreCase);
+					var matches = Regex.Matches(fullStdout, pattern, RegexOptions.IgnoreCase);
 					//For files extract multiple files if any from stdout and comma separate them
 
 					List<string> files = new List<string>();
@@ -426,6 +467,15 @@ namespace FastWrapper
 						{
 							files.Add(match.Groups[1].Value);
 						}
+					}
+
+					// When merged, the chunk files are temporary : report the merged file instead
+					// e.g. Prepare to Merge temporary files into "C:\\temp\\out\\file.csv"
+					Match mergeMatch = Regex.Match(fullStdout, @"Merge temporary files into\s+""([^""]+)""", RegexOptions.IgnoreCase);
+					if (mergeMatch.Success)
+					{
+						files.Clear();
+						files.Add(mergeMatch.Groups[1].Value.Replace(@"\\", @"\"));
 					}
 					string filestringlog = string.Join(", ", files);
 

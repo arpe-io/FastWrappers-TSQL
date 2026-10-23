@@ -46,29 +46,36 @@ jobs:
             exit 1
           }
       
-      - name: Setup SQL Server (LocalDB)
+      - name: Setup SQL Server 2019 (LocalDB)
         shell: powershell
         run: |
-          # Ensure SQL LocalDB instance exists
-          sqllocaldb info MSSQLLocalDB > $null 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "MSSQLLocalDB instance not found. Creating..."
-            sqllocaldb create MSSQLLocalDB
-          } else {
-            Write-Host "MSSQLLocalDB instance already exists."
+          # The .bak must be created with SQL Server 2019 (database version 904) to be restorable on SQL Server 2019+.
+          # windows-latest ships a newer LocalDB (2025 => version 998), so install LocalDB 2019 side by side.
+          Write-Host "Installed LocalDB versions:"
+          sqllocaldb versions
+          $has2019 = (sqllocaldb versions) -match '\(15\.0'
+          if (-not $has2019) {
+            Write-Host "Installing SQL Server 2019 LocalDB..."
+            Invoke-WebRequest -Uri "https://download.microsoft.com/download/7/c/1/7c14e92e-bdcb-4f89-b7cf-93543e7112d1/SqlLocalDB.msi" -OutFile "SqlLocalDB2019.msi"
+            Start-Process msiexec.exe -ArgumentList '/i','SqlLocalDB2019.msi','/qn','IACCEPTSQLLOCALDBLICENSETERMS=YES' -Wait
+            sqllocaldb versions
           }
 
-          # Ensure SQL LocalDB is started
-          sqllocaldb start MSSQLLocalDB
-          
+          sqllocaldb create FW2019 15.0 -s
+          if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create LocalDB 2019 instance"; exit 1 }
+          sqllocaldb info FW2019
+
           # Wait for SQL Server to be ready
           Start-Sleep -Seconds 10
+          $v = sqlcmd -S "(localdb)\FW2019" -h -1 -Q "SET NOCOUNT ON; SELECT SERVERPROPERTY('ProductVersion')"
+          Write-Host "LocalDB version: $v"
+          if ("$v".Trim() -notlike '15.*') { Write-Error "LocalDB instance is not SQL Server 2019"; exit 1 }
       
       - name: Deploy Database and Create Artifacts
         shell: powershell
         run: |
           # Variables
-          $serverInstance = "(localdb)\MSSQLLocalDB"
+          $serverInstance = "(localdb)\FW2019"
           $dbName = "FastWrappers-TSQL"
           $dacpacPath = "bin\Output\FastWrappers_TSQL.dacpac"
           $outputDir = "bin\Release"
@@ -129,6 +136,14 @@ jobs:
           
           if ($LASTEXITCODE -ne 0) {
               Write-Warning "Failed to create BAK file, continuing..."
+          } else {
+              # Guard: the .bak must stay restorable on SQL Server 2019 (database version 904)
+              $dbVersion = sqlcmd -S $serverInstance -h -1 -W -Q "SET NOCOUNT ON; SELECT DATABASEPROPERTYEX(N'$dbName', 'Version')"
+              Write-Host "BAK database version: $dbVersion"
+              if ([int]("$dbVersion".Trim()) -gt 904) {
+                  Write-Error "BAK database version $dbVersion is newer than SQL Server 2019 (904)"
+                  exit 1
+              }
           }
           
           # Generate SQL script with current assembly binary
